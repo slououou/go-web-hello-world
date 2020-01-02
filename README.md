@@ -301,3 +301,397 @@ CMD ["./go-web-hello-world"]
 **Skip**
 
 <br/>
+
+## Task 9: Install a single node Kubernetes cluster using kubeadm
+
+> **Steps:**
+
+> - Disable swap
+```
+>free -m
+```
+>   - comment the swap line in `/etc/fstab` and reboot
+
+> - Check prerequisite packages
+```
+>apt list --installed apt-transport-https curl
+```
+> - Install kubeadm kubectl kubelet
+```
+>apt update
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.list
+deb https://apt.kubernetes.io/ kubernetes-xenial main
+EOF
+>apt update
+>apt install -y kubelet kubeadm kubectl
+>apt-mark hold kubelet kubeadm kubectl
+
+> - Install single master Kubernetes
+>   - edit /lib/systemd/system/docker.service to add env
+```
+[Service]
+Environment="http_proxy=http://proxy_url/" "https_proxy=http://proxy_url/"
+```
+>   - install kubernetes
+```
+>kubeadm config images pull v1.17.0
+>unset http_proxy
+>unset https_proxy
+>kubeadm init --pod-network-cidr=192.168.0.0/16
+>mkdir -p /root/.kube;cp /etc/kubernetes/admin.conf /root/.kube/config
+>kubectl apply -f https://docs.projectcalico.org/v3.8/manifests/calico.yaml
+>kubectl taint nodes --all node-role.kubernetes.io/master-
+```
+> - Check in `admin.conf`
+```
+>cd /root/golang/
+>cp /etc/kubernetes/admin.conf .
+>git add admin.conf
+>git commit -m "admin.conf"
+>git push
+```
+### Task 10: deploy the hello world container
+
+> - Deploy app in cluster
+>   - create demo.yaml for deployment, put below into it
+```
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-web-hello-world
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: go-web-hello-world
+  template:
+    metadata:
+      labels:
+        app: go-web-hello-world
+    spec:
+      containers:
+      - name: go-web-hello-world
+        image: slououou/go-web-hello-world:v0.1
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-web-hello-world
+  namespace: demo
+  labels:
+    app: go-web-hello-world
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    nodePort: 31080
+    targetPort: 80
+  selector:
+    app: go-web-hello-world
+```
+>   - deploy the app
+```
+kubectl apply -f demo.yaml
+```
+>   - open bowser on host and visit 127.0.0.1:31080
+>   - get "Go Web Hello World!"
+
+### Task 11: install kubernetes dashboard
+> - Issue dashboard tls crt and key
+>   - generate dashboard key
+```
+>apt install openssl
+>openssl genrsa -out dashboard.key 2048
+```
+>   - put below in dashboard csr.conf
+```
+[ req ]
+default_bits = 2048
+prompt = no
+default_md = sha256
+req_extensions = req_ext
+distinguished_name = dn
+
+[ dn ]
+C = CN
+ST = ST
+L = CI
+O = O
+OU = OU
+CN = kubernetes-dashboard
+
+[ req_ext ]
+subjectAltName = @alt_names
+
+[ alt_names ]
+DNS.1 = kubernetes-dashboard
+DNS.2 = kubernetes-dashboard.kubernetes-dashboard
+DNS.3 = kubernetes-dashboard.kubernetes-dashboard.svc
+DNS.4 = kubernetes-dashboard.kubernetes-dashboard.svc.cluster
+DNS.5 = kubernetes-dashboard.kubernetes-dashboard.svc.cluster.local
+IP.1 = 127.0.0.1
+IP.2 = 10.0.2.15
+
+[ v3_ext ]
+authorityKeyIdentifier=keyid,issuer:always
+basicConstraints=CA:FALSE
+keyUsage=keyEncipherment,dataEncipherment
+extendedKeyUsage=serverAuth,clientAuth
+subjectAltName=@alt_names
+```
+>   - generate dashboard crt
+```
+openssl req -new -key dashboard.key -out dashboard.csr -config csr.conf
+openssl x509 -req -in dashboard.csr -CA /etc/kubernetes/pki/ca.crt -CAkey /etc/kubernetes/pki/ca.key -CAcreateserial -out dashboard.crt -days 10000 -extensions v3_ext -extfile csr.conf
+```
+>   - put below in dashboard.yaml
+```
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+spec:
+  ports:
+    - port: 443
+      targetPort: 8443
+      nodePort: 31081
+  selector:
+    k8s-app: kubernetes-dashboard
+  type: NodePort
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard-key-holder
+  namespace: kubernetes-dashboard
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard-csrf
+  namespace: kubernetes-dashboard
+type: Opaque
+data:
+  csrf: ""
+---
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard-settings
+  namespace: kubernetes-dashboard
+
+---
+
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+rules:
+  # Allow Dashboard to get, update and delete Dashboard exclusive secrets.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["kubernetes-dashboard-key-holder", "kubernetes-dashboard-certs", "kubernetes-dashboard-csrf"]
+    verbs: ["get", "update", "delete"]
+    # Allow Dashboard to get and update 'kubernetes-dashboard-settings' config map.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kubernetes-dashboard-settings"]
+    verbs: ["get", "update"]
+    # Allow Dashboard to get metrics.
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["heapster", "dashboard-metrics-scraper"]
+    verbs: ["proxy"]
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: ["heapster", "http:heapster:", "https:heapster:", "dashboard-metrics-scraper", "http:dashboard-metrics-scraper"]
+    verbs: ["get"]
+
+---
+
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+rules:
+  # Allow Metrics Scraper to get metrics from the Metrics server
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list", "watch"]
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubernetes-dashboard
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-dashboard
+    namespace: kubernetes-dashboard
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubernetes-dashboard
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-dashboard
+    namespace: kubernetes-dashboard
+
+---
+
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  labels:
+    k8s-app: kubernetes-dashboard
+  name: kubernetes-dashboard
+  namespace: kubernetes-dashboard
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      k8s-app: kubernetes-dashboard
+  template:
+    metadata:
+      labels:
+        k8s-app: kubernetes-dashboard
+    spec:
+      containers:
+        - name: kubernetes-dashboard
+          image: kubernetesui/dashboard:v2.0.0-beta8
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8443
+              protocol: TCP
+          args:
+            - --tls-cert-file=tls.crt
+            - --tls-key-file=tls.key
+            - --namespace=kubernetes-dashboard
+            # Uncomment the following line to manually specify Kubernetes API server Host
+            # If not specified, Dashboard will attempt to auto discover the API server and connect
+            # to it. Uncomment only if the default does not work.
+            # - --apiserver-host=http://my-address:port
+          volumeMounts:
+            - name: kubernetes-dashboard-certs
+              mountPath: /certs
+              # Create on-disk volume to store exec logs
+            - mountPath: /tmp
+              name: tmp-volume
+          livenessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /
+              port: 8443
+            initialDelaySeconds: 30
+            timeoutSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 1001
+            runAsGroup: 2001
+      volumes:
+        - name: kubernetes-dashboard-certs
+          secret:
+            secretName: kubernetes-dashboard-certs
+        - name: tmp-volume
+          emptyDir: {}
+      serviceAccountName: kubernetes-dashboard
+      nodeSelector:
+        "beta.kubernetes.io/os": linux
+      # Comment the following tolerations if Dashboard must not be deployed on master
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+---
+```
+>   - deploy kubernetes dashboard
+```
+kubectl create ns kubernetes-dashboard
+kubectl create secret tls kubernetes-dashboard-certs --cert=dashboard.crt --key=dashboard.key -nkubernetes-dashboard
+kubectl apply -f dashboard.yaml
+```
+>   - view dashboard in https://127.0.0.1:31801/ on host
+
+### Task 12: generate token for dashboard login in task 11
+> - put below in sa.yaml
+```
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kubernetes-dashboard
+```
+> - put below in crb.yaml
+```
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kubernetes-dashboard
+```
+> - get token from bash
+```
+kubectl apply -f sa.yaml
+kubectl apply -f crb.yaml
+kubectl -nkubernetes-dashboard describe secret $(kubectl describe serviceaccount -nkubernetes-dashboard admin-user | grep Tokens:| sed 's/Tokens:\s*//') |grep token: | awk  '{print $2}'
+```
+> - use this token to login kubernetes dashboard
